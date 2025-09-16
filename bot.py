@@ -50,7 +50,7 @@ def index():
 def default_state() -> Dict[str, Any]:
     return {
         "active_index": 0,
-        "channels": [{"pending": [], "counted": [], "joined": 0} for _ in CHANNELS],
+        "channels": [{"joined": 0} for _ in CHANNELS],
         "users": {},   # track per-user progress
     }
 
@@ -69,9 +69,9 @@ def load_state() -> Dict[str, Any]:
     if "active_index" not in state:
         state["active_index"] = 0
     if "channels" not in state or not isinstance(state["channels"], list):
-        state["channels"] = [{"pending": [], "counted": [], "joined": 0} for _ in CHANNELS]
+        state["channels"] = [{"joined": 0} for _ in CHANNELS]
     while len(state["channels"]) < len(CHANNELS):
-        state["channels"].append({"pending": [], "counted": [], "joined": 0})
+        state["channels"].append({"joined": 0})
     if len(state["channels"]) > len(CHANNELS):
         state["channels"] = state["channels"][: len(CHANNELS)]
 
@@ -153,9 +153,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invite = channel["invite"]
     channel_id = channel["id"]
 
+    progress = f"📊 Progress: {state['channels'][idx]['joined']}/{REQUIRED_JOINS} users joined."
+
     if await is_member(context.bot, channel_id, user.id):
         await update.message.reply_text(
-            f"✅ You are already a member of Channel {idx+1}. Sending files:"
+            f"✅ You are already a member of Channel {idx+1}. Sending files...\n\n{progress}"
         )
         await send_channel_files(update.message, idx)
         return
@@ -167,7 +169,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ]
     await update.message.reply_text(
-        f"📢 Please join Channel {idx+1} to unlock the files. After joining, press Verify.",
+        f"📢 Please join Channel {idx+1} to unlock the files. After joining, press Verify.\n\n{progress}",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -189,13 +191,16 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("❌ I still don't see you as a member. Try again.")
         return
 
-    # count this join
-    state["channels"][idx]["joined"] += 1
-    state["users"][user_id] = {"current_channel": idx}
-    save_state(state)
+    # count this join (only once per user per channel)
+    if state["users"].get(user_id, {}).get("current_channel") != idx:
+        state["channels"][idx]["joined"] += 1
+        state["users"][user_id] = {"current_channel": idx}
+        save_state(state)
+
+    progress = f"📊 Progress: {state['channels'][idx]['joined']}/{REQUIRED_JOINS} users joined."
 
     await query.message.reply_text(
-        f"✅ Verified! You are counted for Channel {idx+1}. Sending files..."
+        f"✅ Verified! You are counted for Channel {idx+1}. Sending files...\n\n{progress}"
     )
     await send_channel_files(query.message, idx)
 
@@ -232,4 +237,5 @@ if __name__ == "__main__":
         await serve(app, config)
 
     asyncio.run(main())
+
 
