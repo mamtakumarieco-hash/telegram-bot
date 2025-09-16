@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 """
-Telegram rotating-channel gatekeeper bot (private channels).
-- Users press /start -> bot shows Join (url) + Verify button.
-- Bot marks users as "pending" when it asks them to join.
-- When user presses Verify, bot checks membership for the channel the user was asked to join.
-  - If the user joined and was pending -> move to counted, send files, possibly advance channel.
-  - If the user was already a member but not pending -> send files but DO NOT count them.
-- After the last channel is completed, bot loops back to the first channel.
-- If a user leaves a channel and rejoins through the bot -> they are counted again.
-- State persisted to bot_state.json
+Telegram rotating-channel gatekeeper bot (private channels) + Flask web service (Render).
 """
 
 import os
@@ -16,16 +8,15 @@ import json
 import logging
 import pathlib
 from typing import Dict, Any
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from flask import Flask
-import threading
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # ----------------- CONFIG -----------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # must be set in Render settings
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # must be set in Render environment variables
+if not BOT_TOKEN:
+    raise RuntimeError("❌ Please set BOT_TOKEN as an environment variable in Render.")
 
 CHANNELS = [
     {"id": -1002866596290, "invite": "https://t.me/+vkaa61Ruo5Q5Yjk1"},
@@ -40,8 +31,20 @@ CHANNEL_FILES = [
 ]
 
 STATE_PATH = pathlib.Path("bot_state.json")
-REQUIRED_JOINS = 1
+REQUIRED_JOINS = 1  # number of joins needed before advancing
 # ------------------------------------------
+
+# Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Flask app
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return "✅ Telegram bot + Flask is running on Render!"
+
 
 # ---------- State helpers ----------
 def default_state() -> Dict[str, Any]:
@@ -86,6 +89,7 @@ def save_state(state: Dict[str, Any]):
 # ---------- Helpers ----------
 async def ensure_pending(state: Dict[str, Any], channel_idx: int, user_id: int, bot):
     ch = state["channels"][channel_idx]
+
     try:
         res = await bot.get_chat_member(chat_id=CHANNELS[channel_idx]["id"], user_id=user_id)
         status = res.status
@@ -265,39 +269,21 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------- Main ----------
-def main():
-    if not BOT_TOKEN:
-        logger.error("Please set BOT_TOKEN (environment variable).")
-        return
-
-    if len(CHANNELS) != len(CHANNEL_FILES):
-        logger.error("CHANNELS and CHANNEL_FILES must have the same length.")
-        return
-
-    state = load_state()
-    save_state(state)
-
-    tg_app = Application.builder().token(BOT_TOKEN).build()
-    tg_app.add_handler(CommandHandler("start", start))
-    tg_app.add_handler(CallbackQueryHandler(verify_callback, pattern=r"^verify_"))
-
-    # Flask app (Render requires a web server)
-    web_app = Flask(__name__)
-
-    @web_app.route('/')
-    def home():
-        return "Bot is running on Render!"
-
-    def run_bot():
-        logger.info("Bot started. Polling...")
-        tg_app.run_polling()
-
-    if __name__ == "__main__":
-        t = threading.Thread(target=run_bot, daemon=True)
-        t.start()
-        port = int(os.environ.get("PORT", 5000))
-        web_app.run(host="0.0.0.0", port=port)
-
+tg_app = Application.builder().token(BOT_TOKEN).build()
+tg_app.add_handler(CommandHandler("start", start))
+tg_app.add_handler(CallbackQueryHandler(verify_callback, pattern=r"^verify_"))
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+
+    async def run_bot():
+        await tg_app.initialize()
+        await tg_app.start()
+        await tg_app.updater.start_polling()
+        logger.info("🚀 Bot started and polling...")
+
+    loop = asyncio.get_event_loop()
+    loop.create_task(run_bot())
+
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
