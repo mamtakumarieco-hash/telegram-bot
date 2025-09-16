@@ -31,7 +31,7 @@ CHANNEL_FILES = [
 ]
 
 STATE_PATH = pathlib.Path("bot_state.json")
-REQUIRED_JOINS = 2  # number of users required before advancing to next channel
+REQUIRED_JOINS = 2  # 🔑 number of joins needed before advancing
 # ------------------------------------------
 
 # Logging
@@ -50,8 +50,7 @@ def index():
 def default_state() -> Dict[str, Any]:
     return {
         "active_index": 0,
-        "channels": [{"joined": 0} for _ in CHANNELS],
-        "users": {},   # track per-user progress
+        "channels": [{"joined": 0, "counted": []} for _ in CHANNELS],
     }
 
 
@@ -69,14 +68,12 @@ def load_state() -> Dict[str, Any]:
     if "active_index" not in state:
         state["active_index"] = 0
     if "channels" not in state or not isinstance(state["channels"], list):
-        state["channels"] = [{"joined": 0} for _ in CHANNELS]
+        state["channels"] = [{"joined": 0, "counted": []} for _ in CHANNELS]
+
     while len(state["channels"]) < len(CHANNELS):
-        state["channels"].append({"joined": 0})
+        state["channels"].append({"joined": 0, "counted": []})
     if len(state["channels"]) > len(CHANNELS):
         state["channels"] = state["channels"][: len(CHANNELS)]
-
-    if "users" not in state:
-        state["users"] = {}
 
     return state
 
@@ -122,38 +119,46 @@ async def send_channel_files(target, channel_idx: int):
             except Exception as e:
                 logger.exception("Failed to send video: %s", e)
 
+REQUIRED_JOINS = 2  # change this to any number you like
 
-def advance_if_needed(channel_idx: int) -> bool:
-    """Advance global active_index if enough users joined this channel."""
+def advance_if_needed() -> bool:
+    """
+    Check if current channel has enough joins. If yes, reset and advance.
+    Returns True if advanced, False otherwise.
+    """
     state = load_state()
-    ch = state["channels"][channel_idx]
+    idx = state["active_index"]
+    ch = state["channels"][idx]
 
-    if ch["joined"] >= REQUIRED_JOINS:
-        state["active_index"] = (channel_idx + 1) % len(CHANNELS)
+    if ch.get("joined", 0) >= REQUIRED_JOINS:
+        # ✅ reset counter for current channel
+        ch["joined"] = 0
+        ch["counted"] = []
+
+        # ✅ move to next channel (looping back at end)
+        state["active_index"] = (idx + 1) % len(CHANNELS)
         save_state(state)
-        logger.info(f"🚀 Channel {channel_idx+1} completed. Now active: {state['active_index']+1}")
+
+        logger.info(f"🚀 Channel {idx+1} reached {REQUIRED_JOINS} users. "
+                    f"Now moving to Channel {state['active_index']+1}.")
         return True
+
+    save_state(state)
     return False
+
 
 
 # ---------- Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    user_id = str(user.id)
-
     state = load_state()
     idx = state["active_index"]
-
-    # set user state if new
-    if user_id not in state["users"]:
-        state["users"][user_id] = {"current_channel": idx}
-        save_state(state)
 
     channel = CHANNELS[idx]
     invite = channel["invite"]
     channel_id = channel["id"]
 
-    progress = f"📊 Progress: {state['channels'][idx]['joined']}/{REQUIRED_JOINS} users joined."
+    progress = f"📊 Progress: {state['channels'][idx]['joined']}/{REQUIRED_JOINS} users verified."
 
     if await is_member(context.bot, channel_id, user.id):
         await update.message.reply_text(
@@ -177,40 +182,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user = query.from_user
-    user_id = str(user.id)
+
+    user = update.effective_user
     state = load_state()
-
-    # determine current channel
     idx = state["active_index"]
-    channel = CHANNELS[idx]
-    channel_id = channel["id"]
+    ch = state["channels"][idx]
 
-    # check membership
-    if not await is_member(context.bot, channel_id, user.id):
-        await query.message.reply_text("❌ I still don't see you as a member. Try again.")
-        return
+    # ensure fields exist
+    if "joined" not in ch:
+        ch["joined"] = 0
+    if "counted" not in ch:
+        ch["counted"] = []
 
-    # count this join (only once per user per channel)
-    if state["users"].get(user_id, {}).get("current_channel") != idx:
-        state["channels"][idx]["joined"] += 1
-        state["users"][user_id] = {"current_channel": idx}
+    # avoid double-counting
+    if user.id not in ch["counted"]:
+        ch["joined"] += 1
+        ch["counted"].append(user.id)
         save_state(state)
+        logger.info(f"✅ User {user.id} verified in Channel {idx+1}. "
+                    f"Total = {ch['joined']}")
 
-    progress = f"📊 Progress: {state['channels'][idx]['joined']}/{REQUIRED_JOINS} users joined."
+    # check if we need to advance
+    advanced = advance_if_needed()
 
-    await query.message.reply_text(
-        f"✅ Verified! You are counted for Channel {idx+1}. Sending files...\n\n{progress}"
-    )
-    await send_channel_files(query.message, idx)
-
-    # check if channel can advance
-    if advance_if_needed(idx):
-        next_idx = load_state()["active_index"]
-        await query.message.reply_text(
-            f"🚀 Channel {idx+1} completed after {REQUIRED_JOINS} users. "
-            f"Next active channel: {next_idx+1}."
+    if advanced:
+        await query.edit_message_text(
+            f"🎉 Channel {idx+1} completed! Now moving to Channel {state['active_index']+1}."
         )
+    else:
+        await query.edit_message_text(
+            f"👍 You’ve been counted in Channel {idx+1}. "
+            f"Progress: {ch['joined']}/{REQUIRED_JOINS}."
+        )
+
 
 
 # ---------- Main ----------
