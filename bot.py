@@ -16,16 +16,16 @@ import json
 import logging
 import pathlib
 from typing import Dict, Any
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from flask import Flask
 import threading
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ----------------- CONFIG -----------------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8276933434:AAF8b_noQsGMhS2XXf2qZpRV4j4dRIOZ-lg")  # replace or set env var
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # must be set in Render settings
 
 CHANNELS = [
     {"id": -1002866596290, "invite": "https://t.me/+vkaa61Ruo5Q5Yjk1"},
@@ -40,7 +40,7 @@ CHANNEL_FILES = [
 ]
 
 STATE_PATH = pathlib.Path("bot_state.json")
-REQUIRED_JOINS = 1  # number of joins needed before advancing
+REQUIRED_JOINS = 1
 # ------------------------------------------
 
 # ---------- State helpers ----------
@@ -85,9 +85,7 @@ def save_state(state: Dict[str, Any]):
 
 # ---------- Helpers ----------
 async def ensure_pending(state: Dict[str, Any], channel_idx: int, user_id: int, bot):
-    """Mark user as pending, but allow recount only if they left and rejoined."""
     ch = state["channels"][channel_idx]
-
     try:
         res = await bot.get_chat_member(chat_id=CHANNELS[channel_idx]["id"], user_id=user_id)
         status = res.status
@@ -95,7 +93,6 @@ async def ensure_pending(state: Dict[str, Any], channel_idx: int, user_id: int, 
         logger.warning("get_chat_member failed in ensure_pending: %s", e)
         status = None
 
-    # Reset counted only if user had left or was kicked
     if status in ("left", "kicked") and user_id in ch["counted"]:
         ch["counted"].remove(user_id)
 
@@ -115,7 +112,6 @@ def mark_counted_if_pending(state: Dict[str, Any], channel_idx: int, user_id: in
 
 
 def advance_if_needed(state: Dict[str, Any]) -> bool:
-    """Advance active_index if counted meets REQUIRED_JOINS. Wraps around to 0."""
     idx = state["active_index"]
     counted_len = len(state["channels"][idx]["counted"])
     if counted_len >= REQUIRED_JOINS:
@@ -190,7 +186,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_channel_files(update.message, idx)
         return
 
-    # Not a member -> mark pending and show join + verify
     await ensure_pending(state, idx, user.id, context.bot)
     save_state(state)
 
@@ -271,8 +266,8 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Main ----------
 def main():
-    if BOT_TOKEN == "8276933434:AAF8b_noQsGMhS2XXf2qZpRV4j4dRIOZ-lg" or not BOT_TOKEN:
-        logger.error("Please set BOT_TOKEN (edit script or set BOT_TOKEN env var).")
+    if not BOT_TOKEN:
+        logger.error("Please set BOT_TOKEN (environment variable).")
         return
 
     if len(CHANNELS) != len(CHANNEL_FILES):
@@ -282,7 +277,6 @@ def main():
     state = load_state()
     save_state(state)
 
-    # Rename to tg_app (so it doesn’t clash with Flask)
     tg_app = Application.builder().token(BOT_TOKEN).build()
     tg_app.add_handler(CommandHandler("start", start))
     tg_app.add_handler(CallbackQueryHandler(verify_callback, pattern=r"^verify_"))
@@ -294,19 +288,15 @@ def main():
     def home():
         return "Bot is running on Render!"
 
-    # Run Telegram bot in a separate thread
     def run_bot():
         logger.info("Bot started. Polling...")
         tg_app.run_polling()
 
     if __name__ == "__main__":
-        # Start the bot in background
-        t = threading.Thread(target=run_bot)
+        t = threading.Thread(target=run_bot, daemon=True)
         t.start()
-
-        # Start Flask web server
-        web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
+        port = int(os.environ.get("PORT", 5000))
+        web_app.run(host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
