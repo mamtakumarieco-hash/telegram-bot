@@ -276,14 +276,22 @@ tg_app.add_handler(CallbackQueryHandler(verify_callback, pattern=r"^verify_"))
 if __name__ == "__main__":
     import asyncio
 
-    async def run_bot():
+    async def main():
+        # Start the Telegram bot
         await tg_app.initialize()
         await tg_app.start()
         await tg_app.updater.start_polling()
         logger.info("🚀 Bot started and polling...")
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_bot())
+        # Run Flask inside the same event loop
+        port = int(os.getenv("PORT", 5000))
+        from hypercorn.asyncio import serve
+        from hypercorn.config import Config
 
-    port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+        config = Config()
+        config.bind = [f"0.0.0.0:{port}"]
+
+        # Run Flask server (Hypercorn) together with bot
+        await serve(app, config)
+
+    asyncio.run(main())
