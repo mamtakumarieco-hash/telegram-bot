@@ -31,7 +31,7 @@ CHANNEL_FILES = [
 ]
 
 STATE_PATH = pathlib.Path("bot_state.json")
-REQUIRED_JOINS = 1  # number of joins needed before advancing
+REQUIRED_JOINS = 2  # number of users required before advancing to next channel
 # ------------------------------------------
 
 # Logging
@@ -50,7 +50,8 @@ def index():
 def default_state() -> Dict[str, Any]:
     return {
         "active_index": 0,
-        "channels": [{"pending": [], "counted": []} for _ in CHANNELS],
+        "channels": [{"pending": [], "counted": [], "joined": 0} for _ in CHANNELS],
+        "users": {},   # track per-user progress
     }
 
 
@@ -68,12 +69,14 @@ def load_state() -> Dict[str, Any]:
     if "active_index" not in state:
         state["active_index"] = 0
     if "channels" not in state or not isinstance(state["channels"], list):
-        state["channels"] = [{"pending": [], "counted": []} for _ in CHANNELS]
-
+        state["channels"] = [{"pending": [], "counted": [], "joined": 0} for _ in CHANNELS]
     while len(state["channels"]) < len(CHANNELS):
-        state["channels"].append({"pending": [], "counted": []})
+        state["channels"].append({"pending": [], "counted": [], "joined": 0})
     if len(state["channels"]) > len(CHANNELS):
         state["channels"] = state["channels"][: len(CHANNELS)]
+
+    if "users" not in state:
+        state["users"] = {}
 
     return state
 
@@ -87,59 +90,6 @@ def save_state(state: Dict[str, Any]):
 
 
 # ---------- Helpers ----------
-async def ensure_pending(state: Dict[str, Any], channel_idx: int, user_id: int, bot):
-    ch = state["channels"][channel_idx]
-
-    try:
-        res = await bot.get_chat_member(chat_id=CHANNELS[channel_idx]["id"], user_id=user_id)
-        status = res.status
-    except Exception as e:
-        logger.warning("get_chat_member failed in ensure_pending: %s", e)
-        status = None
-
-    if status in ("left", "kicked") and user_id in ch["counted"]:
-        ch["counted"].remove(user_id)
-
-    if user_id not in ch["pending"]:
-        ch["pending"].append(user_id)
-
-
-def mark_counted_if_pending(state: Dict[str, Any], channel_idx: int, user_id: int) -> bool:
-    ch = state["channels"][channel_idx]
-    if user_id in ch["counted"]:
-        return False
-    if user_id in ch["pending"]:
-        ch["pending"].remove(user_id)
-        ch["counted"].append(user_id)
-        return True
-    return False
-
-
-def advance_if_needed(user_id: str):
-    state = load_state()
-    user_state = state["users"].get(user_id, {"current_channel": 0})
-    current_channel = user_state["current_channel"]
-
-    # ensure channels dict exists
-    if "channels" not in state:
-        state["channels"] = {}
-    if current_channel not in state["channels"]:
-        state["channels"][current_channel] = {"joined": 0}
-
-    # threshold: require 2 joins before advancing
-    REQUIRED_JOINS = 2  
-
-    if state["channels"][current_channel]["joined"] >= REQUIRED_JOINS:
-        user_state["current_channel"] += 1
-        logger.info(f"➡️ Channel {current_channel} reached {REQUIRED_JOINS} users. "
-                    f"User {user_id} moved to channel {user_state['current_channel']}.")
-
-    # save back
-    state["users"][user_id] = user_state
-    save_state(state)
-
-
-
 async def is_member(bot, channel_id: int, user_id: int) -> bool:
     try:
         res = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
@@ -173,40 +123,42 @@ async def send_channel_files(target, channel_idx: int):
                 logger.exception("Failed to send video: %s", e)
 
 
+def advance_if_needed(channel_idx: int) -> bool:
+    """Advance global active_index if enough users joined this channel."""
+    state = load_state()
+    ch = state["channels"][channel_idx]
+
+    if ch["joined"] >= REQUIRED_JOINS:
+        state["active_index"] = (channel_idx + 1) % len(CHANNELS)
+        save_state(state)
+        logger.info(f"🚀 Channel {channel_idx+1} completed. Now active: {state['active_index']+1}")
+        return True
+    return False
+
+
 # ---------- Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    user_id = str(user.id)
+
     state = load_state()
     idx = state["active_index"]
+
+    # set user state if new
+    if user_id not in state["users"]:
+        state["users"][user_id] = {"current_channel": idx}
+        save_state(state)
 
     channel = CHANNELS[idx]
     invite = channel["invite"]
     channel_id = channel["id"]
 
     if await is_member(context.bot, channel_id, user.id):
-        newly_counted = mark_counted_if_pending(state, idx, user.id)
-        if newly_counted:
-            save_state(state)
-            advanced = advance_if_needed(state)
-            save_state(state)
-            if advanced:
-                await update.message.reply_text(
-                    f"✅ You joined Channel {idx+1} — counted! Channel advanced."
-                )
-            else:
-                await update.message.reply_text(
-                    f"✅ You are a member of Channel {idx+1}. Here are your files:"
-                )
-        else:
-            await update.message.reply_text(
-                f"✅ You are already a member of Channel {idx+1}. Sending files:"
-            )
-
+        await update.message.reply_text(
+            f"✅ You are already a member of Channel {idx+1}. Sending files:"
+        )
         await send_channel_files(update.message, idx)
         return
-
-    await ensure_pending(state, idx, user.id, context.bot)
-    save_state(state)
 
     keyboard = [
         [
@@ -220,34 +172,40 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def verify_callback(update: Update, context: CallbackContext):
-    user_id = str(update.effective_user.id)
+async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    user_id = str(user.id)
     state = load_state()
 
-    # get current channel for this user
-    user_state = state["users"].get(user_id, {"current_channel": 0})
-    current_channel = user_state["current_channel"]
+    # determine current channel
+    idx = state["active_index"]
+    channel = CHANNELS[idx]
+    channel_id = channel["id"]
 
-    # make sure channel counter exists
-    if "channels" not in state:
-        state["channels"] = {}
-    if current_channel not in state["channels"]:
-        state["channels"][current_channel] = {"joined": 0}
+    # check membership
+    if not await is_member(context.bot, channel_id, user.id):
+        await query.message.reply_text("❌ I still don't see you as a member. Try again.")
+        return
 
-    # increment channel join count
-    state["channels"][current_channel]["joined"] += 1
-    logger.info(f"✅ User {user_id} joined channel {current_channel}. "
-                f"Total joins = {state['channels'][current_channel]['joined']}")
-
-    # save
-    state["users"][user_id] = user_state
+    # count this join
+    state["channels"][idx]["joined"] += 1
+    state["users"][user_id] = {"current_channel": idx}
     save_state(state)
 
-    # now check if user can advance
-    advance_if_needed(user_id)
+    await query.message.reply_text(
+        f"✅ Verified! You are counted for Channel {idx+1}. Sending files..."
+    )
+    await send_channel_files(query.message, idx)
 
-    await update.message.reply_text("👍 Verified your join!")
-
+    # check if channel can advance
+    if advance_if_needed(idx):
+        next_idx = load_state()["active_index"]
+        await query.message.reply_text(
+            f"🚀 Channel {idx+1} completed after {REQUIRED_JOINS} users. "
+            f"Next active channel: {next_idx+1}."
+        )
 
 
 # ---------- Main ----------
@@ -257,23 +215,21 @@ tg_app.add_handler(CallbackQueryHandler(verify_callback, pattern=r"^verify_"))
 
 if __name__ == "__main__":
     import asyncio
+    from hypercorn.asyncio import serve
+    from hypercorn.config import Config
 
     async def main():
-        # Start the Telegram bot
+        # Start Telegram bot
         await tg_app.initialize()
         await tg_app.start()
         await tg_app.updater.start_polling()
         logger.info("🚀 Bot started and polling...")
 
-        # Run Flask inside the same event loop
+        # Start Flask (via Hypercorn)
         port = int(os.getenv("PORT", 5000))
-        from hypercorn.asyncio import serve
-        from hypercorn.config import Config
-
         config = Config()
         config.bind = [f"0.0.0.0:{port}"]
-
-        # Run Flask server (Hypercorn) together with bot
         await serve(app, config)
 
     asyncio.run(main())
+
