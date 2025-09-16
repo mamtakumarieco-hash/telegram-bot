@@ -271,7 +271,7 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Main ----------
 def main():
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not BOT_TOKEN:
+    if BOT_TOKEN == "8276933434:AAF8b_noQsGMhS2XXf2qZpRV4j4dRIOZ-lg" or not BOT_TOKEN:
         logger.error("Please set BOT_TOKEN (edit script or set BOT_TOKEN env var).")
         return
 
