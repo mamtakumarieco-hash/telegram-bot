@@ -1,0 +1,15 @@
+# Ignore Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore virtual environments
+venv/
+.env/
+
+# Ignore bot state file
+bot_state.json
+
+# Ignore system files
+.DS_Store
+Thumbs.db
