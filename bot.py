@@ -19,7 +19,8 @@ from typing import Dict, Any
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-
+from flask import Flask
+import threading
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -281,12 +282,31 @@ def main():
     state = load_state()
     save_state(state)
 
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(verify_callback, pattern=r"^verify_"))
+    # Rename to tg_app (so it doesn’t clash with Flask)
+    tg_app = Application.builder().token(BOT_TOKEN).build()
+    tg_app.add_handler(CommandHandler("start", start))
+    tg_app.add_handler(CallbackQueryHandler(verify_callback, pattern=r"^verify_"))
 
-    logger.info("Bot started. Polling...")
-    app.run_polling()
+    # Flask app (Render requires a web server)
+    web_app = Flask(__name__)
+
+    @web_app.route('/')
+    def home():
+        return "Bot is running on Render!"
+
+    # Run Telegram bot in a separate thread
+    def run_bot():
+        logger.info("Bot started. Polling...")
+        tg_app.run_polling()
+
+    if __name__ == "__main__":
+        # Start the bot in background
+        t = threading.Thread(target=run_bot)
+        t.start()
+
+        # Start Flask web server
+        web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
 
 
 if __name__ == "__main__":
