@@ -115,14 +115,29 @@ def mark_counted_if_pending(state: Dict[str, Any], channel_idx: int, user_id: in
     return False
 
 
-def advance_if_needed(state: Dict[str, Any]) -> bool:
-    idx = state["active_index"]
-    counted_len = len(state["channels"][idx]["counted"])
-    if counted_len >= REQUIRED_JOINS:
-        state["active_index"] = (idx + 1) % len(CHANNELS)
-        logger.info("Advanced active_index to %s", state["active_index"])
-        return True
-    return False
+def advance_if_needed(user_id: str):
+    state = load_state()
+    user_state = state["users"].get(user_id, {"current_channel": 0})
+    current_channel = user_state["current_channel"]
+
+    # ensure channels dict exists
+    if "channels" not in state:
+        state["channels"] = {}
+    if current_channel not in state["channels"]:
+        state["channels"][current_channel] = {"joined": 0}
+
+    # threshold: require 2 joins before advancing
+    REQUIRED_JOINS = 2  
+
+    if state["channels"][current_channel]["joined"] >= REQUIRED_JOINS:
+        user_state["current_channel"] += 1
+        logger.info(f"➡️ Channel {current_channel} reached {REQUIRED_JOINS} users. "
+                    f"User {user_id} moved to channel {user_state['current_channel']}.")
+
+    # save back
+    state["users"][user_id] = user_state
+    save_state(state)
+
 
 
 async def is_member(bot, channel_id: int, user_id: int) -> bool:
@@ -205,67 +220,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user = query.from_user
-    data = query.data or ""
-    parts = data.split("_")
-    if len(parts) != 2 or not parts[1].isdigit():
-        await query.message.reply_text("⚠️ Invalid verification request.")
-        return
-
-    target_idx = int(parts[1])
+async def verify_callback(update: Update, context: CallbackContext):
+    user_id = str(update.effective_user.id)
     state = load_state()
 
-    if target_idx < 0 or target_idx >= len(CHANNELS):
-        await query.message.reply_text("⚠️ That channel is no longer available.")
-        return
+    # get current channel for this user
+    user_state = state["users"].get(user_id, {"current_channel": 0})
+    current_channel = user_state["current_channel"]
 
-    channel = CHANNELS[target_idx]
-    channel_id = channel["id"]
+    # make sure channel counter exists
+    if "channels" not in state:
+        state["channels"] = {}
+    if current_channel not in state["channels"]:
+        state["channels"][current_channel] = {"joined": 0}
 
-    member = await is_member(context.bot, channel_id, user.id)
-    if not member:
-        await query.message.reply_text(
-            "❌ I still don't see you as a member of that channel. Join and try again."
-        )
-        return
+    # increment channel join count
+    state["channels"][current_channel]["joined"] += 1
+    logger.info(f"✅ User {user_id} joined channel {current_channel}. "
+                f"Total joins = {state['channels'][current_channel]['joined']}")
 
-    newly_counted = mark_counted_if_pending(state, target_idx, user.id)
-    if newly_counted:
-        save_state(state)
-        if state["active_index"] == target_idx:
-            advanced = advance_if_needed(state)
-            save_state(state)
-            await query.message.reply_text(
-                f"✅ Verified & counted for Channel {target_idx+1}. Here are your files:"
-            )
-            await send_channel_files(query.message, target_idx)
-            if advanced:
-                next_idx = state["active_index"]
-                await query.message.reply_text(
-                    f"🚀 Channel {target_idx+1} completed. Next active channel: {next_idx+1}."
-                )
-        else:
-            save_state(state)
-            await query.message.reply_text(
-                f"✅ Verified & counted for Channel {target_idx+1}. Here are your files:"
-            )
-            await send_channel_files(query.message, target_idx)
-    else:
-        ch = state["channels"][target_idx]
-        if user.id in ch.get("counted", []):
-            await query.message.reply_text(
-                f"ℹ️ You were already counted for Channel {target_idx+1}. Sending files again:"
-            )
-            await send_channel_files(query.message, target_idx)
-        else:
-            await query.message.reply_text(
-                f"✅ You are a member of Channel {target_idx+1}, but not in pending list. Not counted, but here are your files:"
-            )
-            await send_channel_files(query.message, target_idx)
+    # save
+    state["users"][user_id] = user_state
+    save_state(state)
+
+    # now check if user can advance
+    advance_if_needed(user_id)
+
+    await update.message.reply_text("👍 Verified your join!")
+
 
 
 # ---------- Main ----------
